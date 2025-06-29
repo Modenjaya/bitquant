@@ -7,12 +7,15 @@ from aiohttp_socks import ProxyConnector
 from fake_useragent import FakeUserAgent
 from base58 import b58decode, b58encode
 from nacl.signing import SigningKey
+from nacl.public import PrivateKey # Tidak langsung digunakan untuk seed, tapi tetap diimpor
 from datetime import datetime, timezone
 from colorama import *
 import asyncio, random, json, os, pytz
 
-# Import Anti-Captcha solver
 from anticaptchaofficial.turnstileproxyless import *
+
+# Inisialisasi colorama agar warna otomatis di-reset
+init(autoreset=True)
 
 wib = pytz.timezone('Asia/Jakarta')
 
@@ -31,7 +34,7 @@ class BitQuant:
         self.BASE_API = "https://quant-api.opengradient.ai/api"
         self.PAGE_URL = "https://www.bitquant.io/"
         self.SITE_KEY = "0x4AAAAAABRnkPBT6yl0YKs1"
-        self.CAPTCHA_KEY = None # This will now store the Anti-Captcha API key
+        self.CAPTCHA_KEY = None
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
@@ -66,35 +69,42 @@ class BitQuant:
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
     
     def load_anticaptcha_key(self):
-        """Loads Anti-Captcha API key from 2captcha_key.txt (renamed for clarity)."""
         try:
             with open("anticaptcha_key.txt", 'r') as file:
                 captcha_key = file.read().strip()
             return captcha_key
+        except FileNotFoundError:
+            self.log(f"{Fore.RED}File 'anticaptcha_key.txt' tidak ditemukan. Harap buat dan masukkan kunci API Anti-Captcha Anda di sana.{Style.RESET_ALL}")
+            return None
         except Exception as e:
-            self.log(f"{Fore.RED}Error loading Anti-Captcha key: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Error memuat kunci Anti-Captcha: {e}{Style.RESET_ALL}")
             return None
     
     def load_question_lists(self):
         filename = "question_lists.json"
         try:
             if not os.path.exists(filename):
-                self.log(f"{Fore.RED}File {filename} Not Found.{Style.RESET_ALL}")
+                self.log(f"{Fore.RED}File {filename} Tidak Ditemukan.{Style.RESET_ALL}")
                 return []
 
             with open(filename, 'r') as file:
                 data = json.load(file)
                 if isinstance(data, list):
                     return data
+                self.log(f"{Fore.RED}Format tidak valid di {filename}. Diharapkan berupa daftar pertanyaan (list of strings).{Style.RESET_ALL}")
                 return []
         except json.JSONDecodeError:
-            self.log(f"{Fore.RED}Error decoding {filename}. Make sure it's valid JSON.{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Error saat mendekode {filename}. Pastikan itu adalah JSON yang valid.{Style.RESET_ALL}")
+            return []
+        except Exception as e:
+            self.log(f"{Fore.RED}Error memuat daftar pertanyaan: {e}{Style.RESET_ALL}")
             return []
     
     async def load_proxies(self, use_proxy_choice: int):
         filename = "proxy.txt"
         try:
-            if use_proxy_choice == 1:
+            if use_proxy_choice == 1: # Proxyscrape Free Proxy
+                self.log(f"{Fore.YELLOW}Mengambil proxy gratis dari Proxyscrape...{Style.RESET_ALL}")
                 async with ClientSession(timeout=ClientTimeout(total=30)) as session:
                     async with session.get("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text") as response:
                         response.raise_for_status()
@@ -102,36 +112,41 @@ class BitQuant:
                         with open(filename, 'w') as f:
                             f.write(content)
                         self.proxies = [line.strip() for line in content.splitlines() if line.strip()]
-            else:
+                self.log(f"{Fore.GREEN}Proxy dari Proxyscrape disimpan ke '{filename}'.{Style.RESET_ALL}")
+            else: # Private Proxy
                 if not os.path.exists(filename):
-                    self.log(f"{Fore.RED + Style.BRIGHT}File {filename} Not Found.{Style.RESET_ALL}")
+                    self.log(f"{Fore.RED + Style.BRIGHT}File {filename} Tidak Ditemukan. Harap buat jika Anda memilih proxy pribadi.{Style.RESET_ALL}")
                     return
                 with open(filename, 'r') as f:
                     self.proxies = [line.strip() for line in f.read().splitlines() if line.strip()]
             
             if not self.proxies:
-                self.log(f"{Fore.RED + Style.BRIGHT}No Proxies Found.{Style.RESET_ALL}")
+                self.log(f"{Fore.RED + Style.BRIGHT}Tidak ada Proxy Ditemukan. Harap periksa sumber proxy atau file Anda.{Style.RESET_ALL}")
                 return
 
             self.log(
-                f"{Fore.GREEN + Style.BRIGHT}Proxies Total  : {Style.RESET_ALL}"
+                f"{Fore.GREEN + Style.BRIGHT}Total Proxy  : {Style.RESET_ALL}"
                 f"{Fore.WHITE + Style.BRIGHT}{len(self.proxies)}{Style.RESET_ALL}"
             )
         
+        except ClientResponseError as e:
+            self.log(f"{Fore.RED + Style.BRIGHT}Gagal mengambil proxy dari Proxyscrape: {e.status} {e.message}{Style.RESET_ALL}")
+            self.proxies = []
         except Exception as e:
-            self.log(f"{Fore.RED + Style.BRIGHT}Failed To Load Proxies: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED + Style.BRIGHT}Gagal Memuat Proxy: {e}{Style.RESET_ALL}")
             self.proxies = []
 
-    def check_proxy_schemes(self, proxies):
+    def check_proxy_schemes(self, proxy_str: str) -> str:
+        """Memastikan skema proxy (http://, socks5://, dll.) ada."""
         schemes = ["http://", "https://", "socks4://", "socks5://"]
-        if any(proxies.startswith(scheme) for scheme in schemes):
-            return proxies
-        return f"http://{proxies}"
+        if any(proxy_str.startswith(scheme) for scheme in schemes):
+            return proxy_str
+        return f"http://{proxy_str}" # Default ke http jika tidak ada skema
 
     def get_next_proxy_for_account(self, token):
+        if not self.proxies:
+            return None
         if token not in self.account_proxies:
-            if not self.proxies:
-                return None
             proxy = self.check_proxy_schemes(self.proxies[self.proxy_index])
             self.account_proxies[token] = proxy
             self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
@@ -145,30 +160,75 @@ class BitQuant:
         self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
         return proxy
 
-    def generate_address(self, account: str):
+    def hex_to_bytes(self, hex_string: str) -> bytes:
+        """Mengubah string heksadesimal menjadi bytes."""
+        return bytes.fromhex(hex_string)
+
+    def bytes_to_base58(self, byte_data: bytes) -> str:
+        """Mengubah bytes menjadi string Base58."""
+        return b58encode(byte_data).decode()
+
+    def generate_address(self, private_key_input: str):
+        """
+        Menghasilkan alamat Solana (public key) dari private key.
+        Mendukung input heksadesimal 64 karakter atau Base58.
+        """
+        private_key_seed_bytes = None
+        
+        # Coba sebagai Base58 terlebih dahulu (umum dari Phantom)
         try:
-            decode_account = b58decode(account)
-            signing_key = SigningKey(decode_account[:32])
-            verify_key = signing_key.verify_key
-            address = b58encode(verify_key.encode()).decode()
-            
-            return address
+            decoded_base58 = b58decode(private_key_input)
+            if len(decoded_base58) == 64: # Private key Solana dari dompet (seed + public key)
+                private_key_seed_bytes = decoded_base58[:32]
+                self.log(f"{Fore.GREEN}Dideteksi sebagai Base58 (64 byte) -> mengambil 32 byte seed.{Style.RESET_ALL}")
+            elif len(decoded_base58) == 32: # Sudah berupa 32 byte seed Base58
+                private_key_seed_bytes = decoded_base58
+                self.log(f"{Fore.GREEN}Dideteksi sebagai Base58 (32 byte seed).{Style.RESET_ALL}")
+            else:
+                raise ValueError(f"Panjang byte Base58 tidak sesuai (ditemukan {len(decoded_base58)} byte, diharapkan 32 atau 64).")
+        except ValueError as e_b58:
+            # Jika gagal sebagai Base58, coba sebagai heksadesimal
+            try:
+                if len(private_key_input) == 64:
+                    private_key_seed_bytes = self.hex_to_bytes(private_key_input)
+                    if len(private_key_seed_bytes) != 32:
+                         raise ValueError("Panjang heksadesimal 64 karakter tetapi setelah dikonversi bukan 32 byte.")
+                    self.log(f"{Fore.GREEN}Dideteksi sebagai Heksadesimal (64 karakter).{Style.RESET_ALL}")
+                else:
+                    raise ValueError(f"Input bukan heksadesimal 64 karakter dan bukan Base58 yang valid. Error Base58: {e_b58}")
+            except ValueError as e_hex:
+                self.log(f"{Fore.RED}Error memproses private key: {e_hex}{Style.RESET_ALL}")
+                return None
         except Exception as e:
-            self.log(f"{Fore.RED}Error generating address: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Terjadi kesalahan tak terduga saat memproses private key: {e}{Style.RESET_ALL}")
             return None
 
-    def generate_payload(self, account: str, address: str):
+        if private_key_seed_bytes:
+            try:
+                signing_key = SigningKey(private_key_seed_bytes)
+                verify_key = signing_key.verify_key
+                address = self.bytes_to_base58(verify_key.encode())
+                return address
+            except Exception as e:
+                self.log(f"{Fore.RED}Error saat membuat signing key atau menghasilkan alamat: {e}{Style.RESET_ALL}")
+                return None
+        return None
+
+    def generate_payload(self, private_key_hex_seed: str, address: str):
+        """
+        Menghasilkan payload autentikasi dari private key heksadesimal 32-byte seed dan alamat.
+        """
         try:
             now = datetime.now(timezone.utc)
             nonce = int(now.timestamp() * 1000)
             issued_at = now.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
             message = f"bitquant.io wants you to sign in with your **blockchain** account:\n{address}\n\nURI: https://bitquant.io\nVersion: 1\nChain ID: solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\nNonce: {nonce}\nIssued At: {issued_at}"
             
-            decode_account = b58decode(account)
-            signing_key = SigningKey(decode_account[:32])
+            private_key_bytes = self.hex_to_bytes(private_key_hex_seed)
+            signing_key = SigningKey(private_key_bytes)
             encode_message = message.encode('utf-8')
             signature = signing_key.sign(encode_message)
-            signature_base58 = b58encode(signature.signature).decode()
+            signature_base58 = self.bytes_to_base58(signature.signature)
 
             payload = {
                 "address": address,
@@ -178,14 +238,17 @@ class BitQuant:
             
             return payload
         except Exception as e:
-            raise Exception(f"Generate Req Payload Failed {str(e)}")
-        
+            raise Exception(f"Gagal Membuat Payload Permintaan: {str(e)}")
+    
     def mask_account(self, account):
         try:
-            mask_account = account[:6] + '*' * 6 + account[-6:]
-            return mask_account
+            # Masking private key heksadesimal (64 karakter) atau Base58 panjang
+            if len(account) >= 10: # Cukup panjang untuk di-masking
+                return account[:6] + '*' * (len(account) - 12) + account[-6:]
+            return account # Fallback jika terlalu pendek
         except Exception as e:
-            return None
+            self.log(f"{Fore.RED}Error masking account: {e}{Style.RESET_ALL}")
+            return account
 
     def generate_agent_payload(self, address: str, turnstile_token: str, question: str):
         try:
@@ -193,7 +256,7 @@ class BitQuant:
                 "context":{
                     "conversationHistory": [
                         { "type":"user", "message":question },
-                        { "type":"user", "message":question }
+                        { "type":"user", "message":question } # Ini sepertinya duplikasi, pastikan ini yang Anda inginkan
                     ],
                     "address":address,
                     "poolPositions":[],
@@ -202,9 +265,9 @@ class BitQuant:
                 "message":{ "type":"user", "message":question },
                 "captchaToken":turnstile_token
             }
-
             return payload
         except Exception as e:
+            self.log(f"{Fore.RED}Error membuat payload agen: {e}{Style.RESET_ALL}")
             return None
         
     async def print_timer(self):
@@ -212,9 +275,9 @@ class BitQuant:
             print(
                 f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
                 f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
-                f"{Fore.BLUE + Style.BRIGHT}Wait For{Style.RESET_ALL}"
+                f"{Fore.BLUE + Style.BRIGHT}Menunggu{Style.RESET_ALL}"
                 f"{Fore.WHITE + Style.BRIGHT} {remaining} {Style.RESET_ALL}"
-                f"{Fore.BLUE + Style.BRIGHT}Seconds For Next Interaction...{Style.RESET_ALL}",
+                f"{Fore.BLUE + Style.BRIGHT}Detik Untuk Interaksi Berikutnya...{Style.RESET_ALL}",
                 end="\r",
                 flush=True
             )
@@ -223,97 +286,113 @@ class BitQuant:
     def print_question(self):
         while True:
             try:
-                min_delay = int(input(f"{Fore.YELLOW + Style.BRIGHT}Min Delay Each Interactions -> {Style.RESET_ALL}").strip())
+                min_delay = int(input(f"{Fore.YELLOW + Style.BRIGHT}Penundaan Minimum Setiap Interaksi (detik) -> {Style.RESET_ALL}").strip())
 
                 if min_delay >= 0:
                     self.min_delay = min_delay
                     break
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Invalid input. Min Delay Must >= 0.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Input tidak valid. Penundaan Minimum Harus >= 0.{Style.RESET_ALL}")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number.{Style.RESET_ALL}")
+                print(f"{Fore.RED + Style.BRIGHT}Input tidak valid. Masukkan angka.{Style.RESET_ALL}")
 
         while True:
             try:
-                max_delay = int(input(f"{Fore.YELLOW + Style.BRIGHT}Max Delay Each Interactions -> {Style.RESET_ALL}").strip())
+                max_delay = int(input(f"{Fore.YELLOW + Style.BRIGHT}Penundaan Maksimum Setiap Interaksi (detik) -> {Style.RESET_ALL}").strip())
 
-                if max_delay >= self.min_delay: # Ensure max_delay is not less than min_delay
+                if max_delay >= self.min_delay:
                     self.max_delay = max_delay
                     break
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Invalid input. Max Delay Must >= Min Delay.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Input tidak valid. Penundaan Maksimum Harus >= Penundaan Minimum.{Style.RESET_ALL}")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number.{Style.RESET_ALL}")
+                print(f"{Fore.RED + Style.BRIGHT}Input tidak valid. Masukkan angka.{Style.RESET_ALL}")
 
         while True:
             try:
-                print(f"{Fore.WHITE + Style.BRIGHT}1. Run With Proxyscrape Free Proxy{Style.RESET_ALL}")
-                print(f"{Fore.WHITE + Style.BRIGHT}2. Run With Private Proxy{Style.RESET_ALL}")
-                print(f"{Fore.WHITE + Style.BRIGHT}3. Run Without Proxy{Style.RESET_ALL}")
-                choose = int(input(f"{Fore.BLUE + Style.BRIGHT}Choose [1/2/3] -> {Style.RESET_ALL}").strip())
+                print(f"{Fore.WHITE + Style.BRIGHT}1. Jalankan dengan Proxy Gratis Proxyscrape{Style.RESET_ALL}")
+                print(f"{Fore.WHITE + Style.BRIGHT}2. Jalankan dengan Proxy Pribadi (dari proxy.txt){Style.RESET_ALL}")
+                print(f"{Fore.WHITE + Style.BRIGHT}3. Jalankan Tanpa Proxy{Style.RESET_ALL}")
+                choose = int(input(f"{Fore.BLUE + Style.BRIGHT}Pilih [1/2/3] -> {Style.RESET_ALL}").strip())
 
                 if choose in [1, 2, 3]:
                     proxy_type = (
-                        "With Proxyscrape Free" if choose == 1 else 
-                        "With Private" if choose == 2 else 
-                        "Without"
+                        "Dengan Proxy Gratis Proxyscrape" if choose == 1 else 
+                        "Dengan Proxy Pribadi" if choose == 2 else 
+                        "Tanpa Proxy"
                     )
-                    print(f"{Fore.GREEN + Style.BRIGHT}Run {proxy_type} Proxy Selected.{Style.RESET_ALL}")
+                    print(f"{Fore.GREEN + Style.BRIGHT}Pilihan '{proxy_type}' Proxy Terpilih.{Style.RESET_ALL}")
                     break
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Please enter either 1, 2 or 3.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Harap masukkan 1, 2 atau 3.{Style.RESET_ALL}")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2 or 3).{Style.RESET_ALL}")
+                print(f"{Fore.RED + Style.BRIGHT}Input tidak valid. Masukkan angka (1, 2 atau 3).{Style.RESET_ALL}")
 
         rotate = False
         if choose in [1, 2]:
             while True:
-                rotate = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip().lower()
+                rotate = input(f"{Fore.BLUE + Style.BRIGHT}Rotasi Proxy Tidak Valid? [y/n] -> {Style.RESET_ALL}").strip().lower()
 
                 if rotate in ["y", "n"]:
                     rotate = rotate == "y"
                     break
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter 'y' or 'n'.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Input tidak valid. Masukkan 'y' atau 'n'.{Style.RESET_ALL}")
 
         return choose, rotate
     
     async def solve_cf_turnstile_anticaptcha(self, retries=5):
-        """Solves Cloudflare Turnstile using Anti-Captcha."""
         for attempt in range(retries):
             try:
                 if self.CAPTCHA_KEY is None:
-                    self.log(f"{Fore.RED}Anti-Captcha API key not set. Please provide it in anticaptcha_key.txt.{Style.RESET_ALL}")
+                    self.log(f"{Fore.RED}Kunci API Anti-Captcha belum diatur. Harap berikan di anticaptcha_key.txt.{Style.RESET_ALL}")
                     return None
                 
                 solver = turnstileProxyless()
-                solver.set_verbose(0)  # Set to 1 for more verbose output from Anti-Captcha
+                solver.set_verbose(0)
                 solver.set_key(self.CAPTCHA_KEY)
                 solver.set_website_url(self.PAGE_URL)
                 solver.set_website_key(self.SITE_KEY)
                 
-                self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.YELLOW + Style.BRIGHT}Sending Captcha to Anti-Captcha...{Style.RESET_ALL}")
+                self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.YELLOW + Style.BRIGHT}Mengirim Captcha ke Anti-Captcha...{Style.RESET_ALL}")
                 token = solver.solve_and_return_solution()
 
                 if token != 0:
-                    self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.GREEN + Style.BRIGHT}Captcha Solved by Anti-Captcha!{Style.RESET_ALL}")
+                    self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.GREEN + Style.BRIGHT}Captcha Berhasil Diselesaikan oleh Anti-Captcha!{Style.RESET_ALL}")
                     return token
                 else:
-                    self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.RED + Style.BRIGHT}Anti-Captcha Error: {solver.error_code}{Style.RESET_ALL}")
-                    await asyncio.sleep(5) # Wait before retrying
+                    self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.RED + Style.BRIGHT}Error Anti-Captcha: {solver.error_code}{Style.RESET_ALL}")
+                    await asyncio.sleep(5)
                     continue
 
             except Exception as e:
-                self.log(f"{Fore.RED}Error during Anti-Captcha solving: {e}{Style.RESET_ALL}")
+                self.log(f"{Fore.RED}Error selama penyelesaian Anti-Captcha (Percobaan {attempt + 1}/{retries}): {e}{Style.RESET_ALL}")
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 return None
         return None
             
-    async def user_login(self, account: str, address: str, proxy=None, retries=5):
+    async def user_login(self, account_original_input: str, address: str, proxy=None, retries=5):
+        private_key_seed_hex_for_payload = None
+        try:
+            decoded_base58 = b58decode(account_original_input)
+            if len(decoded_base58) == 64: # Ini adalah format umum dari Phantom: 32 byte seed + 32 byte public key
+                private_key_seed_hex_for_payload = decoded_base58[:32].hex()
+            elif len(decoded_base58) == 32: # Ini adalah 32 byte seed murni
+                private_key_seed_hex_for_payload = decoded_base58.hex()
+            else: # Jika bukan 32 atau 64 byte dari Base58, mungkin sudah hex 64
+                private_key_seed_hex_for_payload = account_original_input 
+        except ValueError: # Jika Base58decode gagal, berarti input mungkin sudah heksadesimal
+            private_key_seed_hex_for_payload = account_original_input 
+            
+        if not private_key_seed_hex_for_payload or len(private_key_seed_hex_for_payload) != 64:
+            self.log(f"{Fore.RED}Error: Gagal mendapatkan private key seed heksadesimal untuk payload. Format kunci tidak didukung.{Style.RESET_ALL}")
+            return None
+
+
         url = f"{self.BASE_API}/verify/solana"
-        data = json.dumps(self.generate_payload(account, address))
+        data = json.dumps(self.generate_payload(private_key_seed_hex_for_payload, address))
         headers = {
             **self.HEADERS,
             "Content-Length": str(len(data)),
@@ -329,11 +408,18 @@ class BitQuant:
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}Error  :{Style.RESET_ALL}"
+                        f"{Fore.RED+Style.BRIGHT} Login Gagal {Style.RESET_ALL}"
+                        f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                        f"{Fore.BLUE} (Mencoba lagi dalam 5s){Style.RESET_ALL}"
+                    )
                     await asyncio.sleep(5)
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Error  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Login Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Login Gagal {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -357,11 +443,18 @@ class BitQuant:
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}Error  :{Style.RESET_ALL}"
+                        f"{Fore.RED+Style.BRIGHT} Gagal Mendapatkan Id Token {Style.RESET_ALL}"
+                        f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                        f"{Fore.BLUE} (Mencoba lagi dalam 5s){Style.RESET_ALL}"
+                    )
                     await asyncio.sleep(5)
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Error  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} GET Id Token Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Gagal Mendapatkan Id Token {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -383,11 +476,18 @@ class BitQuant:
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}Error  :{Style.RESET_ALL}"
+                        f"{Fore.RED+Style.BRIGHT} Gagal Mendapatkan Statistik Aktivitas {Style.RESET_ALL}"
+                        f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                        f"{Fore.BLUE} (Mencoba lagi dalam 5s){Style.RESET_ALL}"
+                    )
                     await asyncio.sleep(5)
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Error  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} GET Activity Stats Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Gagal Mendapatkan Statistik Aktivitas {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -412,38 +512,48 @@ class BitQuant:
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
+                    self.log(
+                        f"{Fore.CYAN + Style.BRIGHT}    Status    :{Style.RESET_ALL}"
+                        f"{Fore.RED + Style.BRIGHT} Interaksi Gagal {Style.RESET_ALL}"
+                        f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                        f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                        f"{Fore.BLUE} (Mencoba lagi dalam 5s){Style.RESET_ALL}"
+                    )
                     await asyncio.sleep(5)
                     continue
                 self.log(
                     f"{Fore.CYAN + Style.BRIGHT}    Status    :{Style.RESET_ALL}"
-                    f"{Fore.RED + Style.BRIGHT} Interaction Failed {Style.RESET_ALL}"
+                    f"{Fore.RED + Style.BRIGHT} Interaksi Gagal {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
-        return None
+        return None 
             
-    async def process_user_login(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
+    async def process_user_login(self, account_input: str, address: str, use_proxy: bool, rotate_proxy: bool):
         while True:
             proxy = self.get_next_proxy_for_account(address) if use_proxy else None
-            if proxy: # Only log proxy if it's actually used
+            if proxy:
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Proxy  :{Style.RESET_ALL}"
                     f"{Fore.WHITE+Style.BRIGHT} {proxy} {Style.RESET_ALL}"
                 )
 
-            login = await self.user_login(account, address, proxy)
+            login = await self.user_login(account_input, address, proxy)
             if login:
                 self.tokens[address] = login["token"]
                 return True
 
             if rotate_proxy:
-                proxy = self.rotate_proxy_for_account(address)
+                self.log(f"{Fore.YELLOW}Merotasi proxy untuk {self.mask_account(address)}...{Style.RESET_ALL}")
+                self.rotate_proxy_for_account(address)
                 await asyncio.sleep(5)
                 continue
-            return False # If not rotating and login failed, break loop
             
-    async def process_secure_token(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
-        logined = await self.process_user_login(account, address, use_proxy, rotate_proxy)
+            self.log(f"{Fore.RED}Login gagal untuk {self.mask_account(address)} dan rotasi proxy dimatikan atau tidak ada lagi proxy.{Style.RESET_ALL}")
+            return False
+            
+    async def process_secure_token(self, account_input: str, address: str, use_proxy: bool, rotate_proxy: bool):
+        logined = await self.process_user_login(account_input, address, use_proxy, rotate_proxy)
         if logined:
             proxy = self.get_next_proxy_for_account(address) if use_proxy else None
 
@@ -453,82 +563,80 @@ class BitQuant:
 
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
-                    f"{Fore.GREEN+Style.BRIGHT} Login Success {Style.RESET_ALL}"
+                    f"{Fore.GREEN+Style.BRIGHT} Login Berhasil {Style.RESET_ALL}"
                 )
                 return True
-            
+            else:
+                self.log(f"{Fore.RED}Gagal mengamankan ID token untuk {self.mask_account(address)}.{Style.RESET_ALL}")
+        
         return False
 
-    async def process_accounts(self, account: str, address: str, questions: list, use_proxy: bool, rotate_proxy: bool):
-        secured = await self.process_secure_token(account, address, use_proxy, rotate_proxy)
+    async def process_accounts(self, account_input: str, address: str, questions: list, use_proxy: bool, rotate_proxy: bool):
+        secured = await self.process_secure_token(account_input, address, use_proxy, rotate_proxy)
         if secured:
             proxy = self.get_next_proxy_for_account(address) if use_proxy else None
 
             stats = await self.user_stats(address, proxy)
             if not stats:
-                self.log(f"{Fore.RED}Could not retrieve user stats for {self.mask_account(address)}{Style.RESET_ALL}")
+                self.log(f"{Fore.RED}Tidak dapat mengambil statistik pengguna untuk {self.mask_account(address)}{Style.RESET_ALL}")
                 return
 
             points = stats.get("points", 0)
             message_count = stats.get("message_count", 0)
             
             self.log(
-                f"{Fore.CYAN+Style.BRIGHT}Balance:{Style.RESET_ALL}"
+                f"{Fore.CYAN+Style.BRIGHT}Saldo:{Style.RESET_ALL}"
                 f"{Fore.WHITE+Style.BRIGHT} {points} PTS {Style.RESET_ALL}"
             )
             self.log(
-                f"{Fore.CYAN+Style.BRIGHT}Message:{Style.RESET_ALL}"
+                f"{Fore.CYAN+Style.BRIGHT}Pesan:{Style.RESET_ALL}"
                 f"{Fore.WHITE+Style.BRIGHT} {message_count} {Style.RESET_ALL}"
             )
 
             daily_message_count = stats.get("daily_message_count", 0)
             daily_message_limit = stats.get("daily_message_limit", 0)
 
-            if daily_message_count >= daily_message_limit:
+            if daily_message_limit > 0 and daily_message_count >= daily_message_limit:
                 self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Agents :{Style.RESET_ALL}"
-                    f"{Fore.YELLOW+Style.BRIGHT} Daily Interactions Reached {Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT}Agen :{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} Interaksi Harian Telah Tercapai ({daily_message_count}/{daily_message_limit}){Style.RESET_ALL}"
                 )
                 return
+            elif daily_message_limit == 0: 
+                 self.log(f"{Fore.YELLOW}Batas pesan harian adalah 0 atau tidak tersedia. Melewati interaksi.{Style.RESET_ALL}")
+                 return
             
             self.log(f"{Fore.CYAN+Style.BRIGHT}Captcha:{Style.RESET_ALL}")
             
-            turnstile_token = await self.solve_cf_turnstile_anticaptcha() # Use the Anti-Captcha solver
+            turnstile_token = await self.solve_cf_turnstile_anticaptcha()
             if not turnstile_token:
                 self.log(
                     f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}"
                     f"{Fore.BLUE+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                    f"{Fore.RED + Style.BRIGHT} Captcha Turnstile Not Solved {Style.RESET_ALL}"
+                    f"{Fore.RED + Style.BRIGHT} Captcha Turnstile Tidak Terpecahkan {Style.RESET_ALL}"
                 )
                 return
             
             self.log(
                 f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}"
                 f"{Fore.BLUE+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                f"{Fore.GREEN + Style.BRIGHT} Captcha Turnstile Solved Successfully {Style.RESET_ALL}"
+                f"{Fore.GREEN + Style.BRIGHT} Captcha Turnstile Berhasil Terpecahkan!{Style.RESET_ALL}"
             )
 
-            used_questions = set()
-            # To ensure we don't pick the same question repeatedly if questions are limited
-            available_questions_copy = list(questions) 
-            random.shuffle(available_questions_copy) # Shuffle for more randomness
+            available_questions_copy = list(questions)
+            random.shuffle(available_questions_copy) # Mengacak urutan pertanyaan
 
             while daily_message_count < daily_message_limit and available_questions_copy:
                 self.log(
                     f"{Fore.MAGENTA + Style.BRIGHT}  ● {Style.RESET_ALL}"
-                    f"{Fore.BLUE + Style.BRIGHT}Interactions{Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT} {daily_message_count + 1} of {daily_message_limit} {Style.RESET_ALL}"
+                    f"{Fore.BLUE + Style.BRIGHT}Interaksi{Style.RESET_ALL}"
+                    f"{Fore.WHITE + Style.BRIGHT} {daily_message_count + 1} dari {daily_message_limit} {Style.RESET_ALL}"
                 )
 
-                # Get a question that hasn't been used yet for this account in this session
-                if not available_questions_copy:
-                    self.log(f"{Fore.YELLOW}All available questions have been used for this account. Skipping further interactions.{Style.RESET_ALL}")
-                    break
-                
-                question = available_questions_copy.pop(0) # Get and remove the first question
+                question = available_questions_copy.pop(0) # Mengambil pertanyaan pertama dan menghapusnya
 
                 self.log(
-                    f"{Fore.CYAN + Style.BRIGHT}    Question  : {Style.RESET_ALL}"
+                    f"{Fore.CYAN + Style.BRIGHT}    Pertanyaan  : {Style.RESET_ALL}"
                     f"{Fore.WHITE + Style.BRIGHT}{question}{Style.RESET_ALL}"
                 )
 
@@ -538,41 +646,48 @@ class BitQuant:
 
                     self.log(
                         f"{Fore.CYAN + Style.BRIGHT}    Status    :{Style.RESET_ALL}"
-                        f"{Fore.GREEN + Style.BRIGHT} Interaction Success {Style.RESET_ALL}"
+                        f"{Fore.GREEN + Style.BRIGHT} Interaksi Berhasil {Style.RESET_ALL}"
                     )
                     self.log(
-                        f"{Fore.CYAN + Style.BRIGHT}    Answer    : {Style.RESET_ALL}"
+                        f"{Fore.CYAN + Style.BRIGHT}    Jawaban    : {Style.RESET_ALL}"
                         f"{Fore.WHITE + Style.BRIGHT}{answer}{Style.RESET_ALL}"
                     )
 
                     daily_message_count += 1
-                    await self.print_timer() # Use await here
+                    if daily_message_count < daily_message_limit and available_questions_copy:
+                        await self.print_timer()
                 else:
-                    self.log(f"{Fore.RED}Failed to run agent for question: {question}. Retrying...{Style.RESET_ALL}")
-                    # Optionally, you might want to re-add the question or try a different approach
-                    # For now, it will just try to solve captcha again and pick a new question
-            
+                    self.log(f"{Fore.RED}Gagal menjalankan agen untuk pertanyaan: {question}. Mencoba ulang captcha atau melewati...{Style.RESET_ALL}")
+                    turnstile_token = await self.solve_cf_turnstile_anticaptcha()
+                    if not turnstile_token:
+                        self.log(f"{Fore.RED}Tidak dapat menyelesaikan ulang captcha. Melewati interaksi selanjutnya untuk akun ini.{Style.RESET_ALL}")
+                        break 
+
+            if not available_questions_copy and daily_message_count < daily_message_limit:
+                 self.log(f"{Fore.YELLOW}Semua pertanyaan yang tersedia dari daftar telah digunakan untuk akun ini. Melewati interaksi selanjutnya.{Style.RESET_ALL}")
+        
     async def main(self):
         try:
             with open('accounts.txt', 'r') as file:
                 accounts = [line.strip() for line in file if line.strip()]
 
-            # Load Anti-Captcha key (using the new method)
             anticaptcha_key = self.load_anticaptcha_key()
             if anticaptcha_key:
                 self.CAPTCHA_KEY = anticaptcha_key
             else:
-                self.log(f"{Fore.RED}Anti-Captcha API key not found. Please create 'anticaptcha_key.txt' and paste your key there.{Style.RESET_ALL}")
+                self.log(f"{Fore.RED}Kunci API Anti-Captcha tidak ditemukan. Harap buat 'anticaptcha_key.txt' dan tempel kunci Anda di sana.{Style.RESET_ALL}")
+                print(f"{Fore.RED}Keluar...{Style.RESET_ALL}")
                 return
 
             use_proxy_choice, rotate_proxy = self.print_question()
 
             questions = self.load_question_lists()
             if not questions:
-                self.log(f"{Fore.RED + Style.BRIGHT}No Questions Loaded. Please check 'question_lists.json'.{Style.RESET_ALL}")
+                self.log(f"{Fore.RED + Style.BRIGHT}Tidak ada Pertanyaan yang Dimuat. Harap periksa 'question_lists.json'.{Style.RESET_ALL}")
+                print(f"{Fore.RED}Keluar...{Style.RESET_ALL}")
                 return
 
-            while True:
+            while True: # Loop utama untuk menjalankan bot secara terus-menerus (24 jam)
                 use_proxy = False
                 if use_proxy_choice in [1, 2]:
                     use_proxy = True
@@ -580,53 +695,58 @@ class BitQuant:
                 self.clear_terminal()
                 self.welcome()
                 self.log(
-                    f"{Fore.GREEN + Style.BRIGHT}Account's Total: {Style.RESET_ALL}"
+                    f"{Fore.GREEN + Style.BRIGHT}Total Akun: {Style.RESET_ALL}"
                     f"{Fore.WHITE + Style.BRIGHT}{len(accounts)}{Style.RESET_ALL}"
                 )
 
                 if use_proxy:
                     await self.load_proxies(use_proxy_choice)
+                    if not self.proxies and use_proxy_choice in [1, 2]: # Hanya beralih jika memang ada niat pakai proxy tapi gagal
+                        self.log(f"{Fore.YELLOW}Tidak ada proxy yang tersedia setelah pemuatan, beralih ke koneksi langsung (tanpa proxy).{Style.RESET_ALL}")
+                        use_proxy = False
                 
                 separator = "=" * 23
-                for account in accounts:
-                    if account:
-                        address = self.generate_address(account)
+                for account_input in accounts: # 'account_input' bisa berupa private key heksadesimal atau Base58
+                    if account_input:
+                        address = self.generate_address(account_input) # Memanggil dengan private key input
                         self.log(
                             f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
-                            f"{Fore.WHITE + Style.BRIGHT} {self.mask_account(address)} {Style.RESET_ALL}"
+                            f"{Fore.WHITE + Style.BRIGHT} {self.mask_account(account_input)} {Style.RESET_ALL}" # Masking input asli
                             f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
                         )
 
                         if not address:
                             self.log(
                                 f"{Fore.CYAN + Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                                f"{Fore.RED + Style.BRIGHT} Invalid Private Key or Library Version Not Supported {Style.RESET_ALL}"
+                                f"{Fore.RED + Style.BRIGHT} Kunci Pribadi Tidak Valid (Periksa format Base58/Heksadesimal 64 karakter) {Style.RESET_ALL}"
                             )
                             continue
 
-                        await self.process_accounts(account, address, questions, use_proxy, rotate_proxy)
-                        await asyncio.sleep(3) # Short delay between accounts
+                        await self.process_accounts(account_input, address, questions, use_proxy, rotate_proxy)
+                        await asyncio.sleep(3) # Jeda antar akun (opsional, bisa disesuaikan)
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*68)
-                seconds = 24 * 60 * 60
-                while seconds > 0:
+                seconds = 24 * 60 * 60 # 24 jam
+                while seconds > 0: # Ini adalah baris 730 yang telah diperbaiki indentasinya
                     formatted_time = self.format_seconds(seconds)
                     print(
-                        f"{Fore.CYAN+Style.BRIGHT}[ Wait for{Style.RESET_ALL}"
+                        f"{Fore.CYAN+Style.BRIGHT}[ Menunggu{Style.RESET_ALL}"
                         f"{Fore.WHITE+Style.BRIGHT} {formatted_time} {Style.RESET_ALL}"
                         f"{Fore.CYAN+Style.BRIGHT}... ]{Style.RESET_ALL}"
                         f"{Fore.WHITE+Style.BRIGHT} | {Style.RESET_ALL}"
-                        f"{Fore.BLUE+Style.BRIGHT}All Accounts Have Been Processed.{Style.RESET_ALL}",
+                        f"{Fore.BLUE+Style.BRIGHT}Semua Akun Telah Diproses. Akan memulai siklus baru segera.{Style.RESET_ALL}",
                         end="\r"
                     )
                     await asyncio.sleep(1)
                     seconds -= 1
+                print("\n")
 
         except FileNotFoundError:
-            self.log(f"{Fore.RED}File 'accounts.txt' Not Found.{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}File 'accounts.txt' Tidak Ditemukan. Harap buat 'accounts.txt' dan masukkan private key Anda di sana.{Style.RESET_ALL}")
+            print(f"{Fore.RED}Keluar...{Style.RESET_ALL}")
             return
         except Exception as e:
-            self.log(f"{Fore.RED+Style.BRIGHT}Error: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED+Style.BRIGHT}Terjadi kesalahan tak terduga di fungsi utama (main): {e}{Style.RESET_ALL}")
 
 if __name__ == "__main__":
     try:
@@ -636,5 +756,11 @@ if __name__ == "__main__":
         print(
             f"\n{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
-            f"{Fore.RED + Style.BRIGHT}[ EXIT ] BitQuant - BOT{Style.RESET_ALL}                                      "
+            f"{Fore.RED + Style.BRIGHT}[ KELUAR ] BitQuant - BOT                                    " # Spasi tambahan untuk menimpa baris sebelumnya
+        )
+    except Exception as e:
+        print(
+            f"\n{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
+            f"{Fore.RED + Style.BRIGHT}[ ERROR ] Kesalahan tak terduga: {e}{Style.RESET_ALL}"
         )
