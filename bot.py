@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from colorama import *
 import asyncio, random, json, os, pytz
 
+# Import Anti-Captcha solver
+from anticaptchaofficial.turnstileproxyless import *
+
 wib = pytz.timezone('Asia/Jakarta')
 
 class BitQuant:
@@ -28,7 +31,7 @@ class BitQuant:
         self.BASE_API = "https://quant-api.opengradient.ai/api"
         self.PAGE_URL = "https://www.bitquant.io/"
         self.SITE_KEY = "0x4AAAAAABRnkPBT6yl0YKs1"
-        self.CAPTCHA_KEY = None
+        self.CAPTCHA_KEY = None # This will now store the Anti-Captcha API key
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
@@ -62,13 +65,14 @@ class BitQuant:
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
     
-    def load_2captcha_key(self):
+    def load_anticaptcha_key(self):
+        """Loads Anti-Captcha API key from 2captcha_key.txt (renamed for clarity)."""
         try:
-            with open("2captcha_key.txt", 'r') as file:
+            with open("anticaptcha_key.txt", 'r') as file:
                 captcha_key = file.read().strip()
-
             return captcha_key
         except Exception as e:
+            self.log(f"{Fore.RED}Error loading Anti-Captcha key: {e}{Style.RESET_ALL}")
             return None
     
     def load_question_lists(self):
@@ -76,7 +80,7 @@ class BitQuant:
         try:
             if not os.path.exists(filename):
                 self.log(f"{Fore.RED}File {filename} Not Found.{Style.RESET_ALL}")
-                return
+                return []
 
             with open(filename, 'r') as file:
                 data = json.load(file)
@@ -84,6 +88,7 @@ class BitQuant:
                     return data
                 return []
         except json.JSONDecodeError:
+            self.log(f"{Fore.RED}Error decoding {filename}. Make sure it's valid JSON.{Style.RESET_ALL}")
             return []
     
     async def load_proxies(self, use_proxy_choice: int):
@@ -149,6 +154,7 @@ class BitQuant:
             
             return address
         except Exception as e:
+            self.log(f"{Fore.RED}Error generating address: {e}{Style.RESET_ALL}")
             return None
 
     def generate_payload(self, account: str, address: str):
@@ -213,7 +219,7 @@ class BitQuant:
                 flush=True
             )
             await asyncio.sleep(1)
-        
+            
     def print_question(self):
         while True:
             try:
@@ -231,7 +237,7 @@ class BitQuant:
             try:
                 max_delay = int(input(f"{Fore.YELLOW + Style.BRIGHT}Max Delay Each Interactions -> {Style.RESET_ALL}").strip())
 
-                if max_delay >= 0:
+                if max_delay >= self.min_delay: # Ensure max_delay is not less than min_delay
                     self.max_delay = max_delay
                     break
                 else:
@@ -262,7 +268,7 @@ class BitQuant:
         rotate = False
         if choose in [1, 2]:
             while True:
-                rotate = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip()
+                rotate = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip().lower()
 
                 if rotate in ["y", "n"]:
                     rotate = rotate == "y"
@@ -272,58 +278,39 @@ class BitQuant:
 
         return choose, rotate
     
-    async def solve_cf_turnstile(self, proxy=None, retries=5):
+    async def solve_cf_turnstile_anticaptcha(self, retries=5):
+        """Solves Cloudflare Turnstile using Anti-Captcha."""
         for attempt in range(retries):
-            connector = ProxyConnector.from_url(proxy) if proxy else None
             try:
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                if self.CAPTCHA_KEY is None:
+                    self.log(f"{Fore.RED}Anti-Captcha API key not set. Please provide it in anticaptcha_key.txt.{Style.RESET_ALL}")
+                    return None
+                
+                solver = turnstileProxyless()
+                solver.set_verbose(0)  # Set to 1 for more verbose output from Anti-Captcha
+                solver.set_key(self.CAPTCHA_KEY)
+                solver.set_website_url(self.PAGE_URL)
+                solver.set_website_key(self.SITE_KEY)
+                
+                self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.YELLOW + Style.BRIGHT}Sending Captcha to Anti-Captcha...{Style.RESET_ALL}")
+                token = solver.solve_and_return_solution()
 
-                    if self.CAPTCHA_KEY is None:
-                        return None
-                    
-                    url = f"http://2captcha.com/in.php?key={self.CAPTCHA_KEY}&method=turnstile&sitekey={self.SITE_KEY}&pageurl={self.PAGE_URL}"
-                    async with session.get(url=url) as response:
-                        response.raise_for_status()
-                        result = await response.text()
-
-                        if 'OK|' not in result:
-                            await asyncio.sleep(5)
-                            continue
-
-                        request_id = result.split('|')[1]
-
-                        self.log(
-                            f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}"
-                            f"{Fore.BLUE+Style.BRIGHT}Req Id  :{Style.RESET_ALL}"
-                            f"{Fore.WHITE + Style.BRIGHT} {request_id} {Style.RESET_ALL}"
-                        )
-
-                        for _ in range(30):
-                            res_url = f"http://2captcha.com/res.php?key={self.CAPTCHA_KEY}&action=get&id={request_id}"
-                            async with session.get(url=res_url) as res_response:
-                                res_response.raise_for_status()
-                                res_result = await res_response.text()
-
-                                if 'OK|' in res_result:
-                                    turnstile_token = res_result.split('|')[1]
-                                    return turnstile_token
-                                elif res_result == "CAPCHA_NOT_READY":
-                                    self.log(
-                                        f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}"
-                                        f"{Fore.BLUE+Style.BRIGHT}Message :{Style.RESET_ALL}"
-                                        f"{Fore.YELLOW + Style.BRIGHT} Captcha Not Ready {Style.RESET_ALL}"
-                                    )
-                                    await asyncio.sleep(5)
-                                    continue
-                                else:
-                                    break
+                if token != 0:
+                    self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.GREEN + Style.BRIGHT}Captcha Solved by Anti-Captcha!{Style.RESET_ALL}")
+                    return token
+                else:
+                    self.log(f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}{Fore.RED + Style.BRIGHT}Anti-Captcha Error: {solver.error_code}{Style.RESET_ALL}")
+                    await asyncio.sleep(5) # Wait before retrying
+                    continue
 
             except Exception as e:
+                self.log(f"{Fore.RED}Error during Anti-Captcha solving: {e}{Style.RESET_ALL}")
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 return None
-    
+        return None
+            
     async def user_login(self, account: str, address: str, proxy=None, retries=5):
         url = f"{self.BASE_API}/verify/solana"
         data = json.dumps(self.generate_payload(account, address))
@@ -350,7 +337,6 @@ class BitQuant:
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
-
         return None
         
     async def secure_token(self, address: str, proxy=None, retries=5):
@@ -379,7 +365,6 @@ class BitQuant:
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
-
         return None
             
     async def user_stats(self, address: str, proxy=None, retries=5):
@@ -406,7 +391,6 @@ class BitQuant:
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
-
         return None
             
     async def run_agent(self, address: str, turnstile_token: str, question: str, proxy=None, retries=5):
@@ -436,16 +420,16 @@ class BitQuant:
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
-
         return None
             
     async def process_user_login(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
         while True:
             proxy = self.get_next_proxy_for_account(address) if use_proxy else None
-            self.log(
-                f"{Fore.CYAN+Style.BRIGHT}Proxy  :{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {proxy} {Style.RESET_ALL}"
-            )
+            if proxy: # Only log proxy if it's actually used
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Proxy  :{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {proxy} {Style.RESET_ALL}"
+                )
 
             login = await self.user_login(account, address, proxy)
             if login:
@@ -456,9 +440,8 @@ class BitQuant:
                 proxy = self.rotate_proxy_for_account(address)
                 await asyncio.sleep(5)
                 continue
-
-            return False
-        
+            return False # If not rotating and login failed, break loop
+            
     async def process_secure_token(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
         logined = await self.process_user_login(account, address, use_proxy, rotate_proxy)
         if logined:
@@ -474,7 +457,7 @@ class BitQuant:
                 )
                 return True
             
-            return False
+        return False
 
     async def process_accounts(self, account: str, address: str, questions: list, use_proxy: bool, rotate_proxy: bool):
         secured = await self.process_secure_token(account, address, use_proxy, rotate_proxy)
@@ -483,6 +466,7 @@ class BitQuant:
 
             stats = await self.user_stats(address, proxy)
             if not stats:
+                self.log(f"{Fore.RED}Could not retrieve user stats for {self.mask_account(address)}{Style.RESET_ALL}")
                 return
 
             points = stats.get("points", 0)
@@ -508,12 +492,8 @@ class BitQuant:
                 return
             
             self.log(f"{Fore.CYAN+Style.BRIGHT}Captcha:{Style.RESET_ALL}")
-            self.log(
-                f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}"
-                f"{Fore.YELLOW + Style.BRIGHT}Solving Captcha Turnstile{Style.RESET_ALL}"
-            )
             
-            turnstile_token = await self.solve_cf_turnstile(proxy)
+            turnstile_token = await self.solve_cf_turnstile_anticaptcha() # Use the Anti-Captcha solver
             if not turnstile_token:
                 self.log(
                     f"{Fore.MAGENTA+Style.BRIGHT}  ● {Style.RESET_ALL}"
@@ -529,17 +509,23 @@ class BitQuant:
             )
 
             used_questions = set()
+            # To ensure we don't pick the same question repeatedly if questions are limited
+            available_questions_copy = list(questions) 
+            random.shuffle(available_questions_copy) # Shuffle for more randomness
 
-            while daily_message_count < daily_message_limit:
+            while daily_message_count < daily_message_limit and available_questions_copy:
                 self.log(
                     f"{Fore.MAGENTA + Style.BRIGHT}  ● {Style.RESET_ALL}"
                     f"{Fore.BLUE + Style.BRIGHT}Interactions{Style.RESET_ALL}"
-                    f"{Fore.WHITE + Style.BRIGHT} {daily_message_count + 1} of {daily_message_limit} {Style.RESET_ALL}                       "
+                    f"{Fore.WHITE + Style.BRIGHT} {daily_message_count + 1} of {daily_message_limit} {Style.RESET_ALL}"
                 )
 
-                available_questions = [question for question in questions if question not in used_questions]
-
-                question = random.choice(available_questions)
+                # Get a question that hasn't been used yet for this account in this session
+                if not available_questions_copy:
+                    self.log(f"{Fore.YELLOW}All available questions have been used for this account. Skipping further interactions.{Style.RESET_ALL}")
+                    break
+                
+                question = available_questions_copy.pop(0) # Get and remove the first question
 
                 self.log(
                     f"{Fore.CYAN + Style.BRIGHT}    Question  : {Style.RESET_ALL}"
@@ -559,24 +545,31 @@ class BitQuant:
                         f"{Fore.WHITE + Style.BRIGHT}{answer}{Style.RESET_ALL}"
                     )
 
-                used_questions.add(question)
-                daily_message_count += 1
-                self.print_timer()
-                    
+                    daily_message_count += 1
+                    await self.print_timer() # Use await here
+                else:
+                    self.log(f"{Fore.RED}Failed to run agent for question: {question}. Retrying...{Style.RESET_ALL}")
+                    # Optionally, you might want to re-add the question or try a different approach
+                    # For now, it will just try to solve captcha again and pick a new question
+            
     async def main(self):
         try:
             with open('accounts.txt', 'r') as file:
                 accounts = [line.strip() for line in file if line.strip()]
 
-            capctha_key = self.load_2captcha_key()
-            if capctha_key:
-                self.CAPTCHA_KEY = capctha_key
-            
+            # Load Anti-Captcha key (using the new method)
+            anticaptcha_key = self.load_anticaptcha_key()
+            if anticaptcha_key:
+                self.CAPTCHA_KEY = anticaptcha_key
+            else:
+                self.log(f"{Fore.RED}Anti-Captcha API key not found. Please create 'anticaptcha_key.txt' and paste your key there.{Style.RESET_ALL}")
+                return
+
             use_proxy_choice, rotate_proxy = self.print_question()
 
             questions = self.load_question_lists()
             if not questions:
-                self.log(f"{Fore.RED + Style.BRIGHT}No Questions Loaded.{Style.RESET_ALL}")
+                self.log(f"{Fore.RED + Style.BRIGHT}No Questions Loaded. Please check 'question_lists.json'.{Style.RESET_ALL}")
                 return
 
             while True:
@@ -612,7 +605,7 @@ class BitQuant:
                             continue
 
                         await self.process_accounts(account, address, questions, use_proxy, rotate_proxy)
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(3) # Short delay between accounts
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*68)
                 seconds = 24 * 60 * 60
@@ -641,7 +634,7 @@ if __name__ == "__main__":
         asyncio.run(bot.main())
     except KeyboardInterrupt:
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"\n{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
-            f"{Fore.RED + Style.BRIGHT}[ EXIT ] BitQuant - BOT{Style.RESET_ALL}                                       "                              
+            f"{Fore.RED + Style.BRIGHT}[ EXIT ] BitQuant - BOT{Style.RESET_ALL}                                      "
         )
