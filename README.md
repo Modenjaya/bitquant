@@ -33,6 +33,10 @@ BitQuant BOT
    ```bash
    pip install -r requirements.txt #or pip3 install -r requirements.txt
    ```
+Or
+```bash
+   python3 -m pip install base58 aiohttp aiohttp_socks fake_useragent PyNaCl colorama pytz anticaptchaofficial
+   ```
 
 ## Configuration
 
